@@ -92,19 +92,20 @@ func (a *Server) validatePipelineGraph(ctx context.Context, tenant string, graph
 				}
 			}
 		}
-		// Standard bounded routes take a write mode per resource. CDC and
-		// continuous routes plan one write for the whole stream.
-		if mode != ingestionv1.ExecutionMode_EXECUTION_MODE_CONTINUOUS && ev.GetReplication() != ingestionv1.ReplicationMode_REPLICATION_MODE_CDC {
-			continue
-		}
 		writeMode, err := convert.WriteModeFromProto(ev.GetEffectiveWriteMode())
 		if err != nil {
 			continue
 		}
-		if previous, ok := routeWriteModes[route]; ok && previous != writeMode {
-			edgeError(ev, "write_mode", "all resources on a CDC or continuous route must use the same write mode")
+		// Standard bounded routes take a write mode per resource. CDC and
+		// continuous routes plan one write for the whole stream.
+		key, message := route, "all resources on a CDC or continuous route must use the same write mode"
+		if mode != ingestionv1.ExecutionMode_EXECUTION_MODE_CONTINUOUS && ev.GetReplication() != ingestionv1.ReplicationMode_REPLICATION_MODE_CDC {
+			key, message = route+"\x00"+edge.GetResource(), "edges for the same resource must use the same write mode"
+		}
+		if previous, ok := routeWriteModes[key]; ok && previous != writeMode {
+			edgeError(ev, "write_mode", message)
 		} else {
-			routeWriteModes[route] = writeMode
+			routeWriteModes[key] = writeMode
 		}
 	}
 
