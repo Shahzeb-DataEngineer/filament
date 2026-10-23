@@ -74,6 +74,10 @@ func (c *Compiler) compileContinuous(ctx context.Context, tenant filament.Tenant
 		if len(group.transforms) > 0 {
 			return nil, fmt.Errorf("%w: continuous execution does not apply transforms", ErrInvalid)
 		}
+		writeMode, err := group.routeWriteMode()
+		if err != nil {
+			return nil, err
+		}
 		resources, _ := routeResources(group)
 		streamID := uuid.NewString()
 		plan, err := planContinuousSource(ctx, c.Worker, sourceRef, resources, streamID, group.source.ConnectionId)
@@ -81,7 +85,7 @@ func (c *Compiler) compileContinuous(ctx context.Context, tenant filament.Tenant
 			return nil, err
 		}
 		resources = plan.Resources
-		writePlan, err := filament.PlanContinuousWrite(sourceSpec, sinkSpec, group.writeMode)
+		writePlan, err := filament.PlanContinuousWrite(sourceSpec, sinkSpec, writeMode)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrPrecondition, err)
 		}
