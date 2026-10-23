@@ -8,7 +8,7 @@ description: "Read ServiceTitan exports and supporting operational resources wit
 Connector ID `servicetitan`
 
 The ServiceTitan source uses the v2 REST APIs and is **alpha**. It covers
-48 resources. Shared pagination, projection, and checkpoint behavior have
+53 resources. Shared pagination, projection, and checkpoint behavior have
 regression coverage. Live tenant reads have not been validated.
 
 The source is backed by an [HTTP manifest](/pages/connectors/building-a-connector/http-manifests).
@@ -36,9 +36,10 @@ page; it does not establish access to every API family. See the official
 | Family | Resources |
 |---|---|
 | Jobs and projects | `jobs`, `appointments`, `projects`, `job_notes`, `job_history`, `job_types` |
+| Dispatch | `appointment_assignments`, `non_job_appointments` |
 | Customers | `customers`, `locations`, `leads`, `bookings`, `customer_contacts`, `location_contacts` |
-| Accounting | `invoices`, `invoice_items`, `payments` |
-| Inventory | `inventory_adjustments`, `purchase_orders`, `inventory_returns`, `inventory_transfers` |
+| Accounting | `invoices`, `invoice_items`, `payments`, `gl_accounts` |
+| Inventory | `inventory_adjustments`, `purchase_orders`, `inventory_returns`, `inventory_transfers`, `vendors`, `inventory_templates` |
 | Pricebook | `pricebook_categories`, `pricebook_services`, `pricebook_equipment`, `pricebook_materials` |
 | Settings | `employees`, `technicians`, `business_units`, `tag_types` |
 | Marketing and calls | `campaigns`, `campaign_costs`, `campaign_categories`, `calls` |
@@ -50,16 +51,36 @@ Select the resources your application can access. Other ServiceTitan resources,
 including reporting, forms, equipment systems, and newer export feeds, are outside
 the current resource set.
 
+The following dispatch and reference resources require these application read
+permissions. Each row uses the ServiceTitan `id` as its primary key.
+
+| Resource | Row meaning | Read permission |
+|---|---|---|
+| [`appointment_assignments`](https://developer.servicetitan.io/docs/apis/tenant-dispatch-v2/endpoints/Export_AppointmentAssignments) | One technician assignment to an appointment | `tn.dis.appointmentassignments:r` |
+| [`non_job_appointments`](https://developer.servicetitan.io/docs/apis/tenant-dispatch-v2/endpoints/NonJobAppointments_GetList) | One technician non-job appointment | `tn.dis.nonjobappointments:r` |
+| [`vendors`](https://developer.servicetitan.io/docs/apis/tenant-inventory-v2/endpoints/Vendors_GetList) | One inventory vendor | `tn.inv.vendors:r` |
+| [`gl_accounts`](https://developer.servicetitan.io/docs/apis/tenant-accounting-v2/endpoints/GlAccounts_GetList) | One general ledger account | `tn.acc.glaccounts:r` |
+| [`inventory_templates`](https://developer.servicetitan.io/docs/apis/tenant-inventory-v2/endpoints/InventoryTemplates_GetList) | One inventory template with nested items and location IDs | `tn.inv.inventorytemplates:r` |
+
+Vendor addresses, contact information, custom fields, and returned external data
+remain JSON. Application-specific vendor external data requires an
+`externalDataApplicationGuid` selector that this connector does not configure.
+
 ## Modes
 
-All resources support full reads. Incremental reads are available for 42:
-40 export resources use ServiceTitan's opaque `continueFrom` token;
+All resources support full reads. Incremental reads are available for 43.
+41 export resources use ServiceTitan's opaque `continueFrom` token.
 `non_job_timesheets` and `payrolls` use `modifiedOnOrAfter` with a fixed lower
 bound throughout pagination and `sort=+ModifiedOn`.
 
-These six resources support full reads only: `job_types`, `campaigns`,
+Full reads are the only supported mode for `job_types`, `campaigns`,
 `campaign_costs`, `campaign_categories`, `technician_shifts`,
-and `membership_status_changes`.
+`membership_status_changes`, `non_job_appointments`, `vendors`,
+`gl_accounts`, and `inventory_templates`.
+
+`appointment_assignments` uses an export cursor for incremental reads. The four
+list resources above use full reads to refresh their current state. Use full
+replace when destination rows must reflect removals from the source.
 
 Use incremental upsert for mutable export records. No cursor-column selection
 or lookback is supported for export tokens. The first incremental run walks the
@@ -94,12 +115,28 @@ from rows and becomes durable only after successful run commit. Failed runs
 replay from the prior committed token. Missing or malformed envelopes and cursor
 cycles fail the run. Invalid saved tokens are not silently discarded.
 
-`job_types`, `campaigns`, and `technician_shifts` request `active=Any` on every
-page. Transactional full reads use 5,000-row pages; the two timestamp streams use
-1,000-row pages. `includeTotal=true` is sent on each transactional page.
+`appointments`, `job_types`, `campaigns`, `technician_shifts`,
+`non_job_timesheets`, `payrolls`, `appointment_assignments`, `vendors`,
+`gl_accounts`, and `inventory_templates` request `active=Any` on every page.
+`non_job_appointments` uses `activeOnly=false` for the same purpose.
+These are the resources whose endpoints support the active filter. Appointment
+exports already return all items by default. The other nine endpoints default
+to active records only. See the ServiceTitan
+[JPM](https://developer.servicetitan.io/docs/apis/tenant-jpm-v2),
+[Marketing](https://developer.servicetitan.io/docs/apis/tenant-marketing-v2),
+[Dispatch](https://developer.servicetitan.io/docs/apis/tenant-dispatch-v2), and
+[Payroll](https://developer.servicetitan.io/docs/apis/tenant-payroll-v2) API references.
+For existing pipelines, run full reads of `non_job_timesheets` and `payrolls`
+to backfill inactive records older than the saved modification watermarks.
+Adding the explicit filter to `appointments` changes its saved cursor identity,
+so its next incremental run restarts the export from the beginning.
+
+`non_job_appointments`, `vendors`, `gl_accounts`, `inventory_templates`,
+and the two timestamp streams use 1,000-row pages. Other paginated full reads
+use 5,000-row pages. `includeTotal=true` is sent on each transactional page.
 Exports do not send `pageSize`. Requests share a 45-per-second limiter across
 all resource readers in a run, with a burst of one. There is one reader per selected resource (up to
-48); adding readers does not multiply the request budget. Separate runs and
+53). Adding readers does not multiply the request budget. Separate runs and
 pipelines have independent limiters. Requests use the HTTP engine's retry
 handling for throttling and server errors.
 
