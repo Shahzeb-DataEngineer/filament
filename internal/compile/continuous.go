@@ -74,10 +74,6 @@ func (c *Compiler) compileContinuous(ctx context.Context, tenant filament.Tenant
 		if len(group.transforms) > 0 {
 			return nil, fmt.Errorf("%w: continuous execution does not apply transforms", ErrInvalid)
 		}
-		writeMode, err := group.routeWriteMode()
-		if err != nil {
-			return nil, err
-		}
 		resources, _ := routeResources(group)
 		streamID := uuid.NewString()
 		plan, err := planContinuousSource(ctx, c.Worker, sourceRef, resources, streamID, group.source.ConnectionId)
@@ -85,9 +81,9 @@ func (c *Compiler) compileContinuous(ctx context.Context, tenant filament.Tenant
 			return nil, err
 		}
 		resources = plan.Resources
-		writePlan, err := filament.PlanContinuousWrite(sourceSpec, sinkSpec, writeMode)
+		writePlan, err := planRouteContinuousWrite(sourceSpec, sinkSpec, group)
 		if err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrPrecondition, err)
+			return nil, err
 		}
 		policies := continuousWritePolicies(resources, writePlan.Policy)
 		applyContinuousDestinations(policies, graph.Edges, group)
@@ -109,6 +105,20 @@ func (c *Compiler) compileContinuous(ctx context.Context, tenant filament.Tenant
 		out = append(out, CompiledRun{Edge: group.key, Submission: filament.RunSubmission{DesiredReplicationStream: desired, Request: filament.RunRequest{Tenant: tenant, PipelineID: p.Id, PipelineVersionID: v.Id, IdempotencyKey: fmt.Sprintf("%s:%s:%s", p.Id, token, group.key), Source: sourceRef, Sink: sinkRef, SourceConnectionID: group.source.ConnectionId, SinkConnectionID: group.sink.ConnectionId, Resources: resources, CheckpointRoute: group.key, Options: options, WorkerConfiguration: worker.Merge(WorkerConfigurationFromProto(p.WorkerConfiguration)), WritePolicies: policies}}})
 	}
 	return out, nil
+}
+
+// planRouteContinuousWrite plans the one write a continuous route's stream
+// lands with; its resources must agree on the write mode.
+func planRouteContinuousWrite(source filament.ConnectorSpec, sink filament.SinkSpec, group *routeGroup) (filament.ContinuousWritePlan, error) {
+	writeMode, err := group.routeWriteMode()
+	if err != nil {
+		return filament.ContinuousWritePlan{}, err
+	}
+	plan, err := filament.PlanContinuousWrite(source, sink, writeMode)
+	if err != nil {
+		return filament.ContinuousWritePlan{}, fmt.Errorf("%w: %v", ErrPrecondition, err)
+	}
+	return plan, nil
 }
 
 // PlanContinuousSource delegates provider config and fixed membership to the
