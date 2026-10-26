@@ -78,11 +78,17 @@ func TestCompileOrderableDecimalAndTimeComparisons(t *testing.T) {
 					}}}},
 				},
 			}
+			precision, scale := 0, 0
+			if typ == rowmodel.LogicalDecimal {
+				// A decimal with no precision travels as text and is
+				// refused by comparisons; use a bounded one here.
+				precision, scale = 10, 2
+			}
 			schema := rowmodel.Schema{
 				Resource: "items",
 				Fields: []rowmodel.Field{
-					{Name: "left", Logical: typ},
-					{Name: "right", Logical: typ},
+					{Name: "left", Logical: typ, Precision: precision, Scale: scale},
+					{Name: "right", Logical: typ, Precision: precision, Scale: scale},
 				},
 			}
 
@@ -204,5 +210,66 @@ func TestCompileRejectsNegativeRegexExtractGroup(t *testing.T) {
 
 	if _, err := Compile(definition, schema); err == nil {
 		t.Fatal("Compile regex_extract with negative group succeeded, want an error")
+	}
+}
+
+func TestCompileRejectsUnboundedDecimalComparisons(t *testing.T) {
+	for _, fn := range []string{"gt", "gte", "lt", "lte", "eq", "neq"} {
+		for _, tc := range []struct {
+			name      string
+			precision int
+			scale     int
+		}{
+			{name: "no precision", precision: 0, scale: 0},
+			{name: "precision above 38", precision: 40, scale: 2},
+		} {
+			t.Run(fn+"/"+tc.name, func(t *testing.T) {
+				definition := &Definition{
+					Version: 1,
+					Resources: map[string]Resource{
+						"items": {Steps: []Step{{Compute: map[string]Expr{
+							"compared": {
+								Fn:   fn,
+								Args: []Expr{{Col: "left"}, {Col: "right"}},
+							},
+						}}}},
+					},
+				}
+				schema := rowmodel.Schema{
+					Resource: "items",
+					Fields: []rowmodel.Field{
+						{Name: "left", Logical: rowmodel.LogicalDecimal, Precision: tc.precision, Scale: tc.scale},
+						{Name: "right", Logical: rowmodel.LogicalDecimal, Precision: tc.precision, Scale: tc.scale},
+					},
+				}
+				if _, err := Compile(definition, schema); err == nil {
+					t.Fatalf("Compile %s over unbounded decimals succeeded, want an error", fn)
+				}
+			})
+		}
+	}
+}
+
+func TestCompileAllowsBoundedDecimalComparisons(t *testing.T) {
+	definition := &Definition{
+		Version: 1,
+		Resources: map[string]Resource{
+			"items": {Steps: []Step{{Compute: map[string]Expr{
+				"ordered": {
+					Fn:   "gt",
+					Args: []Expr{{Col: "left"}, {Col: "right"}},
+				},
+			}}}},
+		},
+	}
+	schema := rowmodel.Schema{
+		Resource: "items",
+		Fields: []rowmodel.Field{
+			{Name: "left", Logical: rowmodel.LogicalDecimal, Precision: 38, Scale: 2},
+			{Name: "right", Logical: rowmodel.LogicalDecimal, Precision: 38, Scale: 2},
+		},
+	}
+	if _, err := Compile(definition, schema); err != nil {
+		t.Fatalf("Compile gt over bounded decimals: %v", err)
 	}
 }

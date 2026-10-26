@@ -117,7 +117,9 @@ compares an `int16` column with an `int16` literal. A literal that does not
 fit, such as `70000` beside an `int16` column, is an error. A `decimal` column
 takes an integer or fractional literal when the literal needs no more scale or
 precision than the column has. A decimal column with precision above 38 is
-carried as text, and no literal can stand beside it.
+carried as text, and no literal can stand beside it. Two such columns cannot
+be compared either. A comparison over them would order the text forms, so
+compilation fails instead.
 
 ## Functions
 

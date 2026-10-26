@@ -7,8 +7,10 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 
+	"github.com/galaxy-io/filament/arrowbatch"
 	"github.com/galaxy-io/filament/rowmodel"
 	"github.com/galaxy-io/filament/transform/kernel"
 )
@@ -324,13 +326,34 @@ func arithmetic(name, display, symbol, desc string, exec func(context.Context, [
 
 // comparison builds a two-value predicate over a shared type. A nil types
 // admits every type; ordering comparisons pass the types that order.
+// A decimal with no usable precision travels as text, so comparing two of
+// them would order the text forms (10 > 9 is false); that is refused here,
+// the way a literal beside such a column is already refused.
 func comparison(name, display, symbol, desc string, types []rowmodel.LogicalType, exec func(context.Context, []compute.Datum) (compute.Datum, error)) function {
 	return function{
 		spec: FunctionSpec{
 			Name: name, DisplayName: display, Description: desc, OperatorSymbol: symbol, ConditionOperator: true,
 			Args: []ArgSpec{{Name: "left", DisplayName: "Left", Types: types}, {Name: "right", DisplayName: "Compare with", Types: types}}, Returns: rowmodel.LogicalBool, SameType: true,
 		},
-		exec: exec,
+		validate: rejectUnboundedDecimal(name),
+		exec:     exec,
+	}
+}
+
+// rejectUnboundedDecimal refuses a comparison over a decimal column whose
+// precision does not fit decimal128 (none, or above 38), since the column
+// travels as text and the comparison would order text instead of numbers.
+func rejectUnboundedDecimal(name string) func([]argType) error {
+	return func(args []argType) error {
+		for i, a := range args {
+			if a.literal || a.logical != rowmodel.LogicalDecimal {
+				continue
+			}
+			if _, ok := arrowbatch.Type(rowmodel.Field{Logical: a.logical, Precision: a.precision, Scale: a.scale}).(*arrow.Decimal128Type); !ok {
+				return argErrorf(i, "%s cannot compare an unbounded decimal column: it travels as text, so the comparison would order text instead of numbers", name)
+			}
+		}
+		return nil
 	}
 }
 
