@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"connectrpc.com/connect"
@@ -297,18 +298,22 @@ func (a *Server) storeSecretFields(ctx context.Context, schema filament.ConfigSc
 		return nil, err
 	}
 	// A value that is itself an environment reference is a pointer, not
-	// plaintext. When the caller already supplies a ref for that field, keep
-	// it: storing the reference text as the secret value would make every
-	// later resolution hand the connector the literal "env:NAME" string.
+	// plaintext: storing the reference text as the secret value would make
+	// every later resolution hand the connector the literal "env:NAME"
+	// string. Point the field's ref at the referenced variable instead, so
+	// switching from one variable to another takes effect rather than
+	// silently keeping the old one, and a caller that supplies no ref at
+	// all gets one instead of a stored copy of the reference text.
 	var toStore []extractedSecretField
 	for _, field := range fields {
-		if existing, ok := refs[field.path]; ok && existing != "" && isEnvironmentReference(field.value) {
+		if name, ok := environmentReferenceName(field.value); ok {
+			refs[field.path] = name
 			continue
 		}
 		toStore = append(toStore, field)
 	}
-	if len(toStore) > 0 && a.secrets == nil {
-		return nil, fmt.Errorf("secret field %q supplied but no secret provider is configured", toStore[0].path)
+	if len(fields) > 0 && a.secrets == nil {
+		return nil, fmt.Errorf("secret field %q supplied but no secret provider is configured", fields[0].path)
 	}
 
 	written := make([]string, 0, len(toStore))
@@ -331,18 +336,26 @@ func (a *Server) storeSecretFields(ctx context.Context, schema filament.ConfigSc
 	return written, nil
 }
 
-// isEnvironmentReference reports whether a secret value is a reference to
-// an environment variable rather than the secret itself. It mirrors the
-// spellings the CLI normalizes to env:NAME, so a direct API caller sending
-// $NAME or ${NAME} gets the same treatment.
-func isEnvironmentReference(value string) bool {
-	if strings.HasPrefix(value, "env:") {
-		return true
+// environmentReferenceName reports the variable a secret value references,
+// if it is one. It mirrors the spellings the CLI normalizes to env:NAME
+// ($NAME, ${NAME}, env:NAME) and the CLI's variable-name rule, so a literal
+// value that merely starts with "$" (e.g. a bcrypt hash) is never mistaken
+// for a reference.
+var environmentNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+func environmentReferenceName(value string) (string, bool) {
+	var name string
+	switch {
+	case strings.HasPrefix(value, "env:"):
+		name = strings.TrimPrefix(value, "env:")
+	case strings.HasPrefix(value, "${") && strings.HasSuffix(value, "}"):
+		name = strings.TrimSuffix(strings.TrimPrefix(value, "${"), "}")
+	case strings.HasPrefix(value, "$"):
+		name = strings.TrimPrefix(value, "$")
+	default:
+		return "", false
 	}
-	if strings.HasPrefix(value, "${") && strings.HasSuffix(value, "}") {
-		return true
-	}
-	return strings.HasPrefix(value, "$")
+	return name, environmentNamePattern.MatchString(name)
 }
 
 type extractedSecretField struct {

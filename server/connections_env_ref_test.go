@@ -103,3 +103,142 @@ func TestCreateConnectionKeepsEnvironmentSecretReference(t *testing.T) {
 		t.Fatalf("after update, stored secret ref = %q, want %q", got, "FPW_ENV")
 	}
 }
+
+// Switching the referenced variable on update must repoint the ref, not
+// silently keep the old variable.
+func TestUpdateConnectionSwitchesEnvironmentSecretReference(t *testing.T) {
+	store := sqlite.NewMemory()
+	defer store.Close()
+	secrets := &mapSecrets{values: map[string]string{"FPW_ENV": "real-password", "OTHER_ENV": "other-password"}}
+	sources := registry.NewSources()
+	sources.Register("env-ref-fixture", func() filament.Source { return &envRefSource{} })
+	api := New(worker.Local(sources, registry.NewSinks()), store, nil, nil, WithSecrets(secrets))
+
+	config, err := structpb.NewStruct(map[string]any{"host": "db.example", "password": "env:FPW_ENV"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := api.CreateConnection(testCtx(), connect.NewRequest(&ingestionv1.CreateConnectionRequest{
+		Kind: ingestionv1.ConnectorKind_CONNECTOR_KIND_SOURCE, Name: "envtest",
+		Connector: "env-ref-fixture", Config: config,
+		SecretRefs: map[string]string{"password": "FPW_ENV"},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection := created.Msg.GetConnection()
+	updatedConfig, err := structpb.NewStruct(map[string]any{"host": "db.example", "password": "env:OTHER_ENV"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection.Config = updatedConfig
+	if _, err := api.UpdateConnection(testCtx(), connect.NewRequest(&ingestionv1.UpdateConnectionRequest{Connection: connection})); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := store.LoadConnection(testCtx(), filament.DefaultTenantID, created.Msg.GetConnection().GetId())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := restored.SecretRefs["password"]; got != "OTHER_ENV" {
+		t.Fatalf("after update, stored secret ref = %q, want %q", got, "OTHER_ENV")
+	}
+	resolved := map[string]any{}
+	if err := api.resolveConnectionSecrets(testCtx(), restored, resolved); err != nil {
+		t.Fatal(err)
+	}
+	if got := resolved["password"]; got != "other-password" {
+		t.Fatalf("resolved password = %q, want the new environment value", got)
+	}
+}
+
+// A caller that supplies an environment reference but no ref must still get
+// a ref, not a stored copy of the reference text.
+func TestCreateConnectionEnvironmentReferenceWithoutSuppliedRef(t *testing.T) {
+	store := sqlite.NewMemory()
+	defer store.Close()
+	secrets := &mapSecrets{values: map[string]string{"SOLO_ENV": "solo-password"}}
+	sources := registry.NewSources()
+	sources.Register("env-ref-fixture", func() filament.Source { return &envRefSource{} })
+	api := New(worker.Local(sources, registry.NewSinks()), store, nil, nil, WithSecrets(secrets))
+
+	config, err := structpb.NewStruct(map[string]any{"host": "db.example", "password": "env:SOLO_ENV"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := api.CreateConnection(testCtx(), connect.NewRequest(&ingestionv1.CreateConnectionRequest{
+		Kind: ingestionv1.ConnectorKind_CONNECTOR_KIND_SOURCE, Name: "envtest",
+		Connector: "env-ref-fixture", Config: config,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := store.LoadConnection(testCtx(), filament.DefaultTenantID, created.Msg.GetConnection().GetId())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stored.SecretRefs["password"]; got != "SOLO_ENV" {
+		t.Fatalf("stored secret ref = %q, want %q", got, "SOLO_ENV")
+	}
+	resolved := map[string]any{}
+	if err := api.resolveConnectionSecrets(testCtx(), stored, resolved); err != nil {
+		t.Fatal(err)
+	}
+	if got := resolved["password"]; got != "solo-password" {
+		t.Fatalf("resolved password = %q, want the environment value", got)
+	}
+}
+
+// A literal value that merely starts with "$" (e.g. a bcrypt hash) must be
+// stored as a new secret, not mistaken for an environment reference that
+// keeps the old ref.
+func TestUpdateConnectionLiteralDollarValueNotTreatedAsReference(t *testing.T) {
+	store := sqlite.NewMemory()
+	defer store.Close()
+	secrets := &mapSecrets{values: map[string]string{}}
+	sources := registry.NewSources()
+	sources.Register("env-ref-fixture", func() filament.Source { return &envRefSource{} })
+	api := New(worker.Local(sources, registry.NewSinks()), store, nil, nil, WithSecrets(secrets))
+
+	config, err := structpb.NewStruct(map[string]any{"host": "db.example", "password": "old-pass"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := api.CreateConnection(testCtx(), connect.NewRequest(&ingestionv1.CreateConnectionRequest{
+		Kind: ingestionv1.ConnectorKind_CONNECTOR_KIND_SOURCE, Name: "envtest",
+		Connector: "env-ref-fixture", Config: config,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	createdConn, err := store.LoadConnection(testCtx(), filament.DefaultTenantID, created.Msg.GetConnection().GetId())
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldRef := createdConn.SecretRefs["password"]
+	if oldRef == "" {
+		t.Fatal("expected a minted secret ref for the plaintext password")
+	}
+	connection := created.Msg.GetConnection()
+	updatedConfig, err := structpb.NewStruct(map[string]any{"host": "db.example", "password": "$2a$10$abcdefghijklmnopqrstuv"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection.Config = updatedConfig
+	if _, err := api.UpdateConnection(testCtx(), connect.NewRequest(&ingestionv1.UpdateConnectionRequest{Connection: connection})); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := store.LoadConnection(testCtx(), filament.DefaultTenantID, created.Msg.GetConnection().GetId())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := restored.SecretRefs["password"]; got == oldRef {
+		t.Fatalf("stored secret ref unchanged %q: bcrypt-like literal was treated as an environment reference", got)
+	}
+	resolved := map[string]any{}
+	if err := api.resolveConnectionSecrets(testCtx(), restored, resolved); err != nil {
+		t.Fatal(err)
+	}
+	if got := resolved["password"]; got != "$2a$10$abcdefghijklmnopqrstuv" {
+		t.Fatalf("resolved password = %q, want the literal value", got)
+	}
+}
