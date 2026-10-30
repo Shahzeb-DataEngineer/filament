@@ -296,12 +296,23 @@ func (a *Server) storeSecretFields(ctx context.Context, schema filament.ConfigSc
 	if err != nil {
 		return nil, err
 	}
-	if len(fields) > 0 && a.secrets == nil {
-		return nil, fmt.Errorf("secret field %q supplied but no secret provider is configured", fields[0].path)
+	// A value that is itself an environment reference is a pointer, not
+	// plaintext. When the caller already supplies a ref for that field, keep
+	// it: storing the reference text as the secret value would make every
+	// later resolution hand the connector the literal "env:NAME" string.
+	var toStore []extractedSecretField
+	for _, field := range fields {
+		if existing, ok := refs[field.path]; ok && existing != "" && isEnvironmentReference(field.value) {
+			continue
+		}
+		toStore = append(toStore, field)
+	}
+	if len(toStore) > 0 && a.secrets == nil {
+		return nil, fmt.Errorf("secret field %q supplied but no secret provider is configured", toStore[0].path)
 	}
 
-	written := make([]string, 0, len(fields))
-	for _, field := range fields {
+	written := make([]string, 0, len(toStore))
+	for _, field := range toStore {
 		// Concurrent saves and retries of the same connection version must not
 		// reuse a failed attempt's secret or delete another attempt's value.
 		ref := filament.ConnectionSecretRef(tenant, id, field.path, version) + "/" + uuid.NewString()
@@ -318,6 +329,20 @@ func (a *Server) storeSecretFields(ctx context.Context, schema filament.ConfigSc
 		written = append(written, ref)
 	}
 	return written, nil
+}
+
+// isEnvironmentReference reports whether a secret value is a reference to
+// an environment variable rather than the secret itself. It mirrors the
+// spellings the CLI normalizes to env:NAME, so a direct API caller sending
+// $NAME or ${NAME} gets the same treatment.
+func isEnvironmentReference(value string) bool {
+	if strings.HasPrefix(value, "env:") {
+		return true
+	}
+	if strings.HasPrefix(value, "${") && strings.HasSuffix(value, "}") {
+		return true
+	}
+	return strings.HasPrefix(value, "$")
 }
 
 type extractedSecretField struct {
