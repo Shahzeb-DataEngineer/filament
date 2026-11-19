@@ -82,6 +82,39 @@ func TestExtractFixedDecimalRounding(t *testing.T) {
 	}
 }
 
+func TestExtractUnboundedDecimalKeepsExponentDigits(t *testing.T) {
+	// An unbounded decimal is stored as its digits, so an exponent form must
+	// expand exactly instead of going through float64, which keeps only
+	// about 15 to 17 significant digits.
+	for _, tc := range []struct{ value, want string }{
+		{"1.234567890123456789e10", `12345678901.23456789`},
+		{"1.234567890123456789e20", `123456789012345678900`},
+		{"1e5", `100000`},
+		{"1.5e-3", `0.0015`},
+		{"-2.5e2", `-250`},
+		{"1.234567890123456789E10", `12345678901.23456789`},
+		{`"1.234567890123456789e10"`, `12345678901.23456789`},
+		{"123.45", `123.45`},
+		{"1.20e2", `120`},
+		{"0e10", `0`},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			rows, err := extractValue(t, `{type: decimal}`, tc.value)
+			want := []string{fmt.Sprintf(`{"id":"a","n":%s}`, tc.want)}
+			if err != nil || !slices.Equal(rows, want) {
+				t.Fatalf("got rows %q, err %v, want %q", rows, err, want)
+			}
+		})
+	}
+}
+
+func TestExtractUnboundedDecimalRejectsAbsurdExponent(t *testing.T) {
+	rows, err := extractValue(t, `{type: decimal}`, "1e1001")
+	if err == nil || !strings.Contains(err.Error(), `field "n"`) {
+		t.Fatalf("rows=%q, err=%v, want decimal field error", rows, err)
+	}
+}
+
 func TestExtractTimestampAcceptsNumericOffset(t *testing.T) {
 	// Jira Cloud emits created and updated with a numeric zone offset and no
 	// colon, for example 2026-11-13T01:09:44.630+0500. RFC 3339 parsing

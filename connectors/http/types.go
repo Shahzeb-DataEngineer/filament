@@ -111,22 +111,78 @@ func parseFloat(bits int, set func(arrowbatch.RowWriter, float64)) valueParser {
 }
 
 // parseNumberText keeps an unbounded decimal as its digits. A JSON number in
-// exponent form (1e5) is spelled out, since the sinks' numeric parsers take
-// plain digits; at that point it is a float anyway.
+// exponent form (1e5) is spelled out exactly, since the sinks' numeric parsers
+// take plain digits; going through float64 would keep only about 15 to 17
+// significant digits and silently change the value.
 func parseNumberText(w arrowbatch.RowWriter, raw json.RawMessage) error {
 	s, err := unquoted(raw)
 	if err != nil {
 		return err
 	}
 	if strings.ContainsAny(s, "eE") {
-		f, err := strconv.ParseFloat(s, 64)
+		s, err = expandExponent(s)
 		if err != nil {
-			return fmt.Errorf("%q is not a number", s)
+			return err
 		}
-		s = strconv.FormatFloat(f, 'f', -1, 64)
 	}
 	w.String(s)
 	return nil
+}
+
+// expandExponent spells a decimal in exponent form out as plain digits,
+// exactly, using big.Rat so no digits are lost the way a float64 round trip
+// would lose them. The exponent is bounded so a short input cannot expand
+// into an unbounded string.
+func expandExponent(s string) (string, error) {
+	invalid := fmt.Errorf("%q is not a number", s)
+	i := strings.IndexAny(s, "eE")
+	exponent, err := strconv.Atoi(s[i+1:])
+	if err != nil || exponent < -1000 || exponent > 1000 {
+		return "", invalid
+	}
+	r, ok := new(big.Rat).SetString(s)
+	if !ok {
+		return "", invalid
+	}
+	if r.IsInt() {
+		return r.Num().String(), nil
+	}
+	// The denominator of a finite decimal is 2^a * 5^b once reduced, so the
+	// value has an exact decimal spelling with max(a, b) fraction digits.
+	den := new(big.Int).Set(r.Denom())
+	fracDigits := 0
+	zero := new(big.Int)
+	for _, p := range []int64{2, 5} {
+		prime := big.NewInt(p)
+		count := 0
+		for new(big.Int).Rem(den, prime).Cmp(zero) == 0 {
+			den.Quo(den, prime)
+			count++
+		}
+		if count > fracDigits {
+			fracDigits = count
+		}
+	}
+	if den.Cmp(big.NewInt(1)) != 0 {
+		return "", invalid
+	}
+	scaled := new(big.Int).Mul(r.Num(), new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(fracDigits)), nil))
+	scaled.Quo(scaled, r.Denom())
+	return renderScaledDecimal(scaled, fracDigits), nil
+}
+
+// renderScaledDecimal renders scaled / 10^fracDigits as plain decimal digits.
+func renderScaledDecimal(scaled *big.Int, fracDigits int) string {
+	neg := scaled.Sign() < 0
+	digits := new(big.Int).Abs(scaled).String()
+	for len(digits) <= fracDigits {
+		digits = "0" + digits
+	}
+	out := digits[:len(digits)-fracDigits] + "." + digits[len(digits)-fracDigits:]
+	if neg {
+		return "-" + out
+	}
+	return out
 }
 
 func parseString(w arrowbatch.RowWriter, raw json.RawMessage) error {
