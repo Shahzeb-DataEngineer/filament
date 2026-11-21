@@ -147,6 +147,76 @@ func TestLocalAppendMapsColumnsByNameIntegration(t *testing.T) {
 	}
 }
 
+func TestLocalAppendTimeEndOfDayIntegration(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "time.duckdb")
+	schema := filament.RecordSchema{
+		Fields: []filament.SchemaField{
+			{Name: "id", Logical: filament.LogicalInt64},
+			{Name: "t", Logical: filament.LogicalTime, Nullable: true},
+		},
+		PrimaryKey: []string{"id"},
+	}
+	policy := writePolicy(filament.WriteAppend, nil)
+	sink := openLocalSink(t, ctx, path, "time-run", policy, 1, schema)
+
+	// A batch holding 24:00:00 goes through prepared INSERTs; the whole
+	// batch, including its in-range times, must land intact.
+	applyBatch(t, ctx, sink, timeBatch(t, schema, "events", []timeRow{
+		{id: 1, us: 86_400_000_000, ok: true}, // 24:00:00
+		{id: 2, us: 43_200_000_000, ok: true}, // 12:00:00
+		{id: 3, ok: false},                    // NULL
+	}), policy)
+	// A batch with only in-range times still goes through the appender.
+	applyBatch(t, ctx, sink, timeBatch(t, schema, "events", []timeRow{
+		{id: 4, us: 0, ok: true}, // 00:00:00
+	}), policy)
+	if err := sink.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rows := queryLocal(t, path, `SELECT id, t::VARCHAR AS text FROM "main"."events" ORDER BY id`)
+	want := [][]any{{int64(1), "24:00:00"}, {int64(2), "12:00:00"}, {int64(3), nil}, {int64(4), "00:00:00"}}
+	if fmt.Sprint(rows) != fmt.Sprint(want) {
+		t.Fatalf("rows = %v, want %v", rows, want)
+	}
+}
+
+type timeRow struct {
+	id int64
+	us int64
+	ok bool
+}
+
+func timeBatch(t *testing.T, schema filament.RecordSchema, resource string, rows []timeRow) *arrowbatch.Batch {
+	t.Helper()
+	collector := &integrationCollector{}
+	builder := arrowbatch.NewBuilder(arrowbatch.Schema(schema), nil, arrowbatch.Options{MaxRows: len(rows) + 1}, collector)
+	for _, row := range rows {
+		builder.Int64(row.id)
+		if row.ok {
+			builder.Time(row.us)
+		} else {
+			builder.Null()
+		}
+		if err := builder.EndRow(rowmodel.Meta{}); err != nil {
+			_ = builder.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := builder.Flush(); err != nil {
+		_ = builder.Close()
+		t.Fatal(err)
+	}
+	if err := builder.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(collector.batches) != 1 {
+		t.Fatalf("builder emitted %d batches, want 1", len(collector.batches))
+	}
+	collector.batches[0].Resource = resource
+	return collector.batches[0]
+}
+
 func TestLocalUpsertRefusesKeylessTableIntegration(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "keyless.duckdb")

@@ -106,6 +106,10 @@ func valueFor(f arrow.Field) valueFn {
 			return time.Unix(days*86400, 0).UTC()
 		}
 	case arrow.TIME64:
+		// Values below 24:00:00 only: go-duckdb binds TIME from time.Time,
+		// whose hour runs 0-23, so a value at or past 24:00:00 would wrap
+		// to midnight. Those batches never reach here; timeNeedsStatement
+		// routes them through prepared INSERTs instead.
 		return func(col arrow.Array, i int) driver.Value {
 			return time.Unix(0, 0).UTC().Add(time.Duration(col.(*array.Time64).Value(i)) * time.Microsecond)
 		}
